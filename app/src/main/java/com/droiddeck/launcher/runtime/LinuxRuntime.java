@@ -34,6 +34,8 @@ public final class LinuxRuntime {
     /** Shortcut extra naming which of the modes above a Linux entry launches. */
     public static final String EXTRA_LINUX_MODE = "linux_mode";
     private static final String KGSL_DEVICE = "/dev/kgsl-3d0";
+    /** Arm's kbase node, the one a Mali's Vulkan driver opens. */
+    private static final String MALI_DEVICE = "/dev/mali0";
     /**
      * Where the guest sees a command's XDG_RUNTIME_DIR. A Unix socket's path must fit in 108 bytes,
      * and libwayland checks the guest's path before proot ever sees it: with the app on an SD card
@@ -292,14 +294,22 @@ public final class LinuxRuntime {
      * An app process may not open {@code /dev/dri} - the nodes exist but are labelled
      * {@code graphics_device}, which stock policy grants surfaceflinger and not us - yet libdrm and
      * everything built on it identify a GPU by its render node, and gamescope refuses to offer
-     * linux-dmabuf without one. The KGSL device Turnip actually drives ({@code gpu_device}, which we
-     * may open) stands in: it appears as a render node with the sysfs entries libdrm reads, and our
-     * Turnip build reports the same device numbers for it.
+     * linux-dmabuf without one. The GPU device the driver actually drives ({@code gpu_device}, which
+     * we may open) stands in: it appears as a render node with the sysfs entries libdrm reads, and
+     * our Turnip build reports the same device numbers for it.
+     *
+     * <p>Where there is no KGSL the vendor Mali node takes the same part, and is bound at its own
+     * path too: a driver speaking kbase opens {@code /dev/mali0} instead of a render node, so an
+     * imported PanVK build has to find it there. The sysfs names on that path are what those drivers
+     * expect to read; no Mali device has confirmed them yet.
      */
     private static void bindGpuNode(Context context, List<String> cmd) {
+        boolean adreno = new File(KGSL_DEVICE).exists();
+        String gpuDevice = adreno ? KGSL_DEVICE : MALI_DEVICE;
+        String driverName = adreno ? "kgsl-3d0" : "mali";
         StructStat st;
         try {
-            st = Os.stat(KGSL_DEVICE);
+            st = Os.stat(gpuDevice);
         } catch (ErrnoException e) {
             return;
         }
@@ -319,7 +329,8 @@ public final class LinuxRuntime {
             Files.write(new File(drm, "dev").toPath(),
                     (major + ":" + minor + "\n").getBytes(StandardCharsets.UTF_8));
             Files.write(new File(device, "uevent").toPath(),
-                    "DRIVER=kgsl-3d0\nMODALIAS=platform:kgsl-3d0\n".getBytes(StandardCharsets.UTF_8));
+                    ("DRIVER=" + driverName + "\nMODALIAS=platform:" + driverName + "\n")
+                            .getBytes(StandardCharsets.UTF_8));
             File subsystem = new File(device, "subsystem");
             if (!Files.isSymbolicLink(subsystem.toPath())) {
                 Os.symlink("/sys/bus/platform", subsystem.getPath());
@@ -328,14 +339,19 @@ public final class LinuxRuntime {
             // on a mainline kernel, and the driver it reads the load of (bindAdrenoStats).
             File driver = new File(device, "driver");
             if (!Files.isSymbolicLink(driver.toPath())) {
-                Os.symlink("/sys/bus/platform/drivers/msm_drm", driver.getPath());
+                Os.symlink("/sys/bus/platform/drivers/" + (adreno ? "msm_drm" : "mali"), driver.getPath());
             }
         } catch (IOException | ErrnoException e) {
             return;
         }
         bind(cmd, new File(base, "sys").getPath() + ":/sys/dev/char");
         bind(cmd, dri.getPath() + ":/dev/dri");
-        bind(cmd, KGSL_DEVICE + ":/dev/dri/" + node);
+        bind(cmd, gpuDevice + ":/dev/dri/" + node);
+        if (!adreno) {
+            // The render node is for gamescope and MangoHud; the driver itself asks for the node
+            // by the name kbase gives it on Android.
+            bind(cmd, gpuDevice + ":/dev/mali0");
+        }
         bindDrmClass(base, cmd, node, major + ":" + minor);
     }
 

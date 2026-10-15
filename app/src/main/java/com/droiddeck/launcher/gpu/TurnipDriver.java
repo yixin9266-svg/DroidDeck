@@ -6,6 +6,7 @@ import android.os.Environment;
 import android.util.Log;
 
 import com.droiddeck.launcher.R;
+import com.droiddeck.launcher.core.DeviceSupport;
 import com.droiddeck.launcher.core.FileUtils;
 import com.droiddeck.launcher.core.TarZst;
 import com.droiddeck.launcher.session.SessionPrefs;
@@ -25,11 +26,12 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 /**
- * The Vulkan driver the in-app compositor runs on. It has to be Turnip: the system Adreno driver
- * does not implement VK_EXT_image_drm_format_modifier, so importing the dma-bufs gamescope hands
- * over fails and the session renders nothing. Two builds ship in the apk, one per Adreno
- * generation, and the GPU decides which is unpacked - unless the user has imported an AdrenoTools
- * zip of their own and chosen it, which then wins.
+ * The Vulkan driver the in-app compositor runs on. On Adreno it has to be Turnip: the system
+ * Adreno driver does not implement VK_EXT_image_drm_format_modifier, so importing the dma-bufs
+ * gamescope hands over fails and the session renders nothing. Two builds ship in the apk, one per
+ * Adreno generation, and the GPU decides which is unpacked - unless the user has imported an
+ * AdrenoTools zip of their own and chosen it, which then wins. On a GPU that is not Adreno there
+ * is nothing bundled to pick, and the compositor runs on the system driver.
  *
  * <p>The guest's own Turnip is a different copy entirely - a glibc build inside the rootfs, or an
  * imported one ({@link LinuxVulkanDriverManager}). This one is the bionic build the app process
@@ -338,6 +340,14 @@ public final class TurnipDriver {
             if (forced.startsWith("system")) return null;
             if (forced.startsWith("a8")) return DRIVER_A8XX;
             if (forced.startsWith("a7")) return DRIVER_A7XX;
+        }
+        // Both bundled builds are Adreno-only, and the digit match below would read "Mali-G925"
+        // as an 8xx and unpack a driver naming a library no other GPU has. Where there is no KGSL
+        // the vendor's own driver is the only one that can open the GPU, so the compositor takes
+        // the system loader - what the "system" override above asks for by hand.
+        if (!DeviceSupport.INSTANCE.adreno()) {
+            Log.i(TAG, "no Adreno: the compositor uses the system Vulkan driver");
+            return null;
         }
         String model = gpuModel();
         Log.i(TAG, "gpu model: " + (model == null ? "unknown" : model));
